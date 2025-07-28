@@ -27,7 +27,7 @@ all_IDs_num <-  as.numeric(stringi::stri_extract_first(all_IDs, regex = "[0-9]+"
 # fill_grid = grid_sf$PIXEL %in% all_IDs_num
 # 
 ## create a Google Map static key
-register_google(key = "AIzaSyAjBys4FdcQnt1y1bACtFz5g_fMJr0xdM8")
+register_google(key = "")
 map <- get_googlemap(center=c(-82.273528,28.209394),zoom=9,maptype = "terrain",style = "feature:all|element:all|saturation:-100|lightness:50")
 # 
 # ## Transform the grid_sf to latitude and longitude in decimal degrees
