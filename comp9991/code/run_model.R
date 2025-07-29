@@ -64,24 +64,30 @@ jackknife_se_gaus_sequential <- function(
     vario_func,
     basis,
     full_fit_result = NULL,
-    ncores = ncores,
+    ncores = NULL,
     optimiser = "L-BFGS-B",
     save_path = "results_jackknife/"
 ) {
-  n <- length(data)
   if (!dir.exists(save_path)) dir.create(save_path, recursive = TRUE)
   
-  # Step 1: Configure parameters based on mode
+  # Step 1: Subset data based on mode
   cat(sprintf("\n--- Configuring Jackknife for Mode: %d ---\n", mode))
   if (mode == 0) {
+    # Explicitly duplicate data0 to reflect double usage in loss
+    data0 <- Filter(function(x) x[[3]] == 0, data)
+    data1 <- Filter(function(x) x[[3]] == 1, data)
+    data2 <- Filter(function(x) x[[3]] == 2, data)
+    data_jack <- c(data0, data1, data0, data2)  # data0 appears twice
     init_params <- general_init
     lower_bounds <- general_lb
     upper_bounds <- general_ub
   } else if (mode == 1) {
+    data_jack <- Filter(function(x) x[[3]] %in% c(0, 1), data)
     init_params <- general_init[2]
     lower_bounds <- general_lb[2]
     upper_bounds <- general_ub[2]
   } else if (mode == 2) {
+    data_jack <- Filter(function(x) x[[3]] %in% c(0, 2), data)
     init_params <- general_init[3]
     lower_bounds <- general_lb[3]
     upper_bounds <- general_ub[3]
@@ -89,11 +95,14 @@ jackknife_se_gaus_sequential <- function(
     stop("Invalid mode specified. Must be 0, 1, or 2.")
   }
   
+  n <- length(data_jack)
+  cat(sprintf("Length of jackknife data: %d\n", n))
+  
   # Step 2: Full model fit (if not provided)
   if (is.null(full_fit_result)) {
     cat("Performing full dataset fit...\n")
     full_fit <- fit_model_gaus(
-      data = data, coords = coords, init = init_params, vario_func = vario_func,
+      data = data_jack, coords = coords, init = init_params, vario_func = vario_func,
       basis = basis, ncores = ncores, lb = lower_bounds, ub = upper_bounds,
       optimiser = optimiser, mode = mode, hessian = FALSE
     )
@@ -108,7 +117,7 @@ jackknife_se_gaus_sequential <- function(
   cat(sprintf("Starting sequential jackknife for %d iterations (using %d cores per fit)...\n", n, ncores))
   
   results <- pblapply(1:n, function(i) {
-    data_loo <- data[-i]
+    data_loo <- data_jack[-i]
     fit_i <- tryCatch({
       fit_model_gaus(
         data = data_loo, coords = coords, init = full_theta, vario_func = vario_func,
