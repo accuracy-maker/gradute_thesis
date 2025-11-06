@@ -1,20 +1,29 @@
-# gradute_thesis
-My graduate thesis fouces on extreme value theory especially r-Pareto process modelling mutiple extremes simultaneously
+# Bayesian R-Pareto Mixture for Spatial Extremes
 
-## Stage One (T2 2025)
-1. Learn the theory
-2. Explore if we can model $L_1$ and $L_{\infty}$ simultaneously
+This repository contains the code for my thesis on modelling extreme rainfall using a **Bayesian mixture of \(\mathcal{R}\)-Pareto processes**. The goal is to jointly model different physical drivers of extreme precipitation (frontal vs. convective events) in a single probabilistic framework.
 
+## Key Ideas
 
-## Experiment
-**Table**: Extreme Event Partition, Model Parameters, and Standard Errors (rounded to 4 decimal places)
+- Models multiple extremal regimes **jointly**, not separately.
+- Learns:
+  - spatial range parameters (Brown–Resnick semivariogram),
+  - latent membership (frontal vs. convective),
+  - mixture weights.
+- Uses an \(L_1\)-based \(\mathcal{R}\)-Pareto likelihood; extendable to other \(L_p\).
+- Validated through simulation and applied to real rainfall from Tampa Bay, Florida.
 
-| Risk Func   | Threshold | S_{1,∞} | S₁  | S_∞ | c_{1,∞} | c₁     | c_∞    | λ₁     | λ_∞    | Difference        |
-|-------------|-----------|---------|-----|-----|---------|--------|--------|--------|--------|-------------------|
-| L₁          | 0.9995    | 0       | 64  | 0   | --      | 0.0574 | --     | 3.6678 | --     | 5.22 × 10⁻⁶       |
-|             |           |         |     |     |         | (0.0104) |        | (0.6678) |        |                   |
-| L_∞         | 0.9995    | 0       | 0   | 63  | --      | --     | 0.0930 | --     | 5.9425 | 6.20 × 10⁻⁶       |
-|             |           |         |     |     |         |        | (0.0088) |        | (0.5648) |                 |
-| Mixed       | 0.9995    | 12      | 52  | 51  | 0.0334  | 0.0240 | 0.0595 | 3.6681 | 5.9421 | --                |
-|             |           |         |     |     | (0.0038) | (0.0040) | (0.0062) | (0.5038) | (0.6429) |           |
+## Repository Structure
 
+```text
+├─ code                 
+│  ├─ application_final.Rmd # code for application study
+│  └─ simulation_final.Rmd  # code for simulation
+└─ README.md
+
+@misc{rpareto-mixture-sevt,
+  author  = {Haitao Gao},
+  title   = {Bayesian Mixture of \mathcal{R}-Pareto Processes for Spatial Rainfall Extremes},
+  year    = {2025},
+  note    = {Thesis codebase},
+  url     = {https://github.com/accuracy-maker/gradute_thesis.git}
+}

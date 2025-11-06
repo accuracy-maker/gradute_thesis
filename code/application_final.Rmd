@@ -1,0 +1,583 @@
+---
+title: "Application Final Version"
+output: html_notebook
+---
+
+# Import packages
+```{r}
+library(sf)
+library(mapview)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(evd)  
+library(parallel)  
+library(FNN)
+library(stringr)
+```
+
+# Load map
+```{r}
+pathshp <- "~/comp9991/data/geo/DOPGrid.shp"
+map <- st_read(pathshp, quiet = TRUE)
+print(map)
+mapview(map)
+```
+# Load data
+```{r}
+data <- read.csv("~/comp9991/data/PixelRain15min_1995.csv",header = TRUE)
+
+change_time_resolution <- function(data, res = "default"){
+  # data: dataframe
+  data <- data %>%
+  mutate(DateTime = dmy_hms(DateTime),    
+         Date = as.Date(DateTime),
+         Hour = floor_date(DateTime, "hour"))
+  
+  if (res == "default"){
+    return(data)
+  }
+  else if (res == "hourly"){
+    data_hourly <- data %>% 
+      group_by(Hour) %>% 
+      summarise(across(starts_with("P"), \(x) sum(x, na.rm = TRUE)))
+    
+    return(data_hourly)
+  }
+  else if (res == "daily"){
+    data_daily <- data %>%
+      group_by(Date) %>%
+      summarise(across(starts_with("P"), \(x) sum(x, na.rm = TRUE)))
+    return(data_daily)
+  }
+}
+
+
+```
+
+hourly
+```{r}
+data_hourly <- change_time_resolution(data,res = "hourly")
+class(data_hourly)
+```
+
+```{r}
+all_pixel_IDs <- names(data_hourly)[-1]
+all_pixel_IDs <- as.numeric(stringi::stri_extract_first(all_pixel_IDs, regex = "[0-9]+"))
+```
+
+```{r}
+sub_map <- map %>%
+  filter(PIXEL %in% all_pixel_IDs)
+
+mapview(sub_map)
+```
+
+cut a square: 14*14
+```{r}
+cutid1 <- seq(11951+2, 11951 + 13+2)
+cutid2 <- seq(11874+2, 11874 + 13+2)
+cutid3 <- seq(11796+2, 11796 + 13+2)
+cutid4 <- seq(11716+2, 11716 + 13+2)
+cutid5 <- seq(11635+2, 11635 + 13+2)
+cutid6 <- seq(11553+2, 11553 + 13+2)
+cutid7 <- seq(11470+2, 11470 + 13+2)
+cutid8 <- seq(11386+2, 11386 + 13+2)
+cutid9 <- seq(11301+2, 11301 + 13+2)
+cutid10 <- seq(11215+2, 11215 + 13+2)
+cutid11 <- seq(11129+2, 11129 + 13+2)
+cutid12 <- seq(11042+2, 11042 + 13+2)
+cutid13 <- seq(10954+2, 10954 + 13+2)
+cutid14 <- seq(10866+2, 10866 + 13+2)
+
+cut_id <- c(
+  cutid1,
+  cutid2,
+  cutid3,
+  cutid4,
+  cutid5, 
+  cutid6,
+  cutid7,
+  cutid8,
+  cutid9,
+  cutid10,
+  cutid11,
+  cutid12,
+  cutid13,
+  cutid14
+)
+```
+
+```{r}
+square_map <- sub_map %>%
+  filter(OBJECTID %in% cut_id)
+
+mapview(square_map)
+```
+
+```{r}
+data_hourly <- data_hourly[rowSums(data_hourly[, -1]) > 0, ]
+sub_pixel <- square_map$PIXEL
+idx <- all_pixel_IDs %in% sub_pixel
+idx <- c(TRUE, idx)
+data_hourly_sub <- data_hourly[, idx]
+```
+
+```{r}
+val <- data_hourly_sub[20, 2:ncol(data_hourly_sub)]
+
+val_long <- val %>%
+  pivot_longer(
+    cols = starts_with("P"),
+    names_to = "PIXEL_COL_NAME",
+    values_to = "value"  
+  ) %>%
+  mutate(
+    PIXEL = as.integer(str_remove(PIXEL_COL_NAME, pattern = "P"))
+  ) %>%
+  select(PIXEL, value)
+
+square_map_value <- square_map %>%
+  left_join(val_long, by = "PIXEL")
+
+mapview(square_map_value, zcol="value")
+```
+
+filter extremes
+```{r}
+rain_hourly_mat <- as.matrix(data_hourly_sub[, -1])
+rain_hourly_uniform <- apply(rain_hourly_mat, 2, function(col) {
+  ind <- col > 0
+  u <- numeric(length(col))
+  u[ind] <- rank(col[ind]) / (sum(ind) + 1)
+  u
+})
+
+eps <- 1e-10
+rain_hourly_uniform[rain_hourly_uniform <= 0] <- eps
+rain_hourly_uniform[rain_hourly_uniform >= 1] <- 1 - eps
+
+rain_hourly_pareto <- qgpd(rain_hourly_uniform, xi = 1, beta = 1, mu = 1)
+
+L1_risk_hourly <- rowMeans(rain_hourly_pareto, na.rm = TRUE)
+u_L1_hourly   <- quantile(L1_risk_hourly, 0.90, na.rm = TRUE)
+extreme_L1_hourly <- rain_hourly_pareto[L1_risk_hourly > u_L1_hourly, ]
+```
+
+idx of timestep
+```{r}
+idx_ext_hourly <- which(L1_risk_hourly > u_L1_hourly & !is.na(L1_risk_hourly))
+times_hourly <- data_hourly_sub[[1]][idx_ext_hourly]
+```
+
+# compute the coord
+```{r}
+square_map_m <- st_transform(square_map, crs = 3577)
+centroids_m <- st_centroid(square_map_m)
+coords_m <- st_coordinates(centroids_m)    
+```
+
+
+```{r}
+nn <- get.knn(coords_m, k = 2)$nn.dist[, 2]
+cell_len_m <- median(nn)
+
+coord <- coords_m / cell_len_m
+```
+
+# bayesian mixture model
+```{r}
+build_Gamma <- function(coord, alpha, theta){
+  D <- as.matrix(dist(coord))
+  G <- (D / theta)^alpha
+  diag(G) <- 0 # \gamma(0) = 0
+  return(G)
+}
+
+prep_br <- function(Gamma) {
+  d <- nrow(Gamma)
+  out <- vector("list", d)
+  for (j in 1:d) {
+    idx <- setdiff(seq_len(d), j)
+    Sigj <- ( outer(Gamma[idx, j], rep(1, d-1)) +
+                outer(rep(1, d-1), Gamma[idx, j]) -
+                Gamma[idx, idx] )
+    Sigj <- Sigj + .Machine$double.eps * diag(d-1)
+    Lj   <- chol(Sigj)
+    out[[j]] <- list(idx = idx, L = Lj, Gamma_col = Gamma[, j])
+  }
+  out
+}
+
+intensity_logskew <- function(x,par,alpha.para=TRUE,log=TRUE){
+  sigma = par[[1]]
+  if(!is.matrix(x)){x <- matrix(x,nrow=1)}
+  n = ncol(x)
+  if(n==1) return(1/(x^2))
+  omega2 = diag(sigma)
+  chol.sigma = chol(sigma)
+  inv.sigma = chol2inv(chol.sigma)
+  logdet.sigma = sum(log(diag(chol.sigma)))*2
+  if(alpha.para){
+    alpha = par[[2]]
+    delta = c(sigma %*% alpha)/sqrt(c(1+alpha %*% sigma %*% alpha))
+  }else{
+    delta = par[[2]]
+    alpha = c(1 - delta %*% inv.sigma %*% delta)^(-1/2) * c(inv.sigma %*% delta)
+  }
+  a = log(2) + pnorm(delta,log.p=TRUE)
+  q = rowSums(inv.sigma)
+  sum.q = sum(q);sum.alpha = sum(alpha)
+  q.mat = matrix(q,n,n,byrow=TRUE)
+  x.log = log(x)
+  x.circ = x.log + matrix(a,nrow=nrow(x),ncol=n,byrow=TRUE)
+  beta = (1+sum.alpha^2/sum.q)^(-0.5)
+  tau.tilde = apply(x.circ,1,function(x.i)  beta * sum((alpha - sum.alpha*q/sum.q) * (x.i + omega2/2))+ beta*sum.alpha/sum.q)
+  A = inv.sigma - q %*% t(q)/sum.q
+  val = -(n-3)/2 * log(2) - (n-1)/2*log(pi)-1/2*logdet.sigma - 1/2*log(sum.q) - 1/2 * (sum(q*omega2)-1)/sum.q - 1/8*c(omega2 %*% A %*% omega2) 
+  val = val - rowSums(x.log) - 1/2 * apply(x.circ,1,function(x.i) c(x.i %*% A %*% x.i) + sum(x.i * (2*q/sum.q + c(A %*% omega2)))) + pnorm(tau.tilde,log.p=TRUE)
+  if(log)
+    return(val)
+  else
+    return(exp(val))    
+}
+
+dlog_beta  <- function(x, a, b) dbeta(x, a, b, log = TRUE) # mixture weight prior
+dlog_gamma <- function(x, a, b) dgamma(x, shape = a, rate = b, log = TRUE)
+
+component_loglik <- function(X, coord, alpha, theta, anchor = 1){
+  Gamma <- build_Gamma(coord = coord, alpha = alpha, theta = theta)
+  prep  <- prep_br(Gamma)
+  idx   <- prep[[anchor]]$idx
+  L     <- prep[[anchor]]$L
+  Sigma <- t(L) %*% L
+  Xsub  <- as.matrix(X[, idx, drop = FALSE])
+  intensity_logskew(
+    Xsub, par = list(Sigma, delta = rep(0, ncol(Xsub))),
+    alpha.para = FALSE, log = TRUE
+  )
+}
+
+mix_loglik <- function(X, coord, alpha, th1, th2, anchor = 1) {
+  if (!is.finite(th1) || th1 <= 0) return(list(l1 = rep(-Inf, nrow(X)), l2 = rep(-Inf, nrow(X))))
+  if (!is.finite(th2) || th2 <= 0) return(list(l1 = rep(-Inf, nrow(X)), l2 = rep(-Inf, nrow(X))))
+  l1 <- component_loglik(X, coord, alpha = alpha, theta = th1, anchor = anchor)
+  l2 <- component_loglik(X, coord, alpha = alpha, theta = th2, anchor = anchor)
+  list(l1 = l1, l2 = l2)
+}
+
+tau_from_ll <- function(l1, l2, lambda) {
+  a <- log(lambda)     + l1
+  b <- log(1 - lambda) + l2
+  m <- pmax(a, b)
+  exp(a - m) / (exp(a - m) + exp(b - m))
+}
+
+mcmc_br <- function(
+    data, coord, alpha,
+    n_iter   = 4000,
+    burn     = 1000,
+    thin     = 2,
+    # priors
+    a_lambda = 1, b_lambda = 1,   # for mixture weight lambda
+    a_th2 = 1, b_th2 = 1,         # for theta2
+    a_del = 1, b_del = 1,         # for delta
+    # proposal sds on log-scale
+    prop_sd_log_th2  = 0.10,
+    prop_sd_log_del  = 0.10,
+    # initials
+    init_lambda = 0.5,  # mixture weight
+    init_th2    = 15,   # theta2
+    init_del    = 20,   # delta
+    anchor = 1,
+    verbose_every = 100
+){
+  stopifnot(init_lambda > 0, init_lambda < 1, init_th2 > 0, init_del > 0)
+  
+  keep_idx <- seq.int(burn + 1, n_iter, by = thin)
+  n_keep   <- length(keep_idx)
+  
+  draws <- data.frame(
+    iter     = keep_idx,
+    lambda   = NA_real_,   # mixture weight
+    theta1   = NA_real_,
+    theta2   = NA_real_
+  )
+  z_draws <- matrix(NA_integer_, nrow = n_keep, ncol = nrow(data))
+  tau_bar <- rep(0, nrow(data))
+  
+  # init
+  lambda <- init_lambda
+  th2    <- init_th2
+  del    <- init_del
+  th1    <- th2 + del
+  
+  ll  <- mix_loglik(X = data, coord = coord, alpha = alpha, th1 = th1, th2 = th2, anchor = anchor)
+  tau <- tau_from_ll(ll$l1, ll$l2, lambda = lambda)
+  z   <- rbinom(n = length(tau), size = 1, prob = tau)
+  
+  acc_block <- 0L; n_prop <- 0L
+  
+  # helper: complete-data log-posterior in η-space (η2=log θ2, ηd=log δ)
+  logpost_eta <- function(eta2, etad, z_vec) {
+    th2p <- exp(eta2)
+    delp <- exp(etad)
+    th1p <- th2p + delp
+    
+    llp <- mix_loglik(X = data, coord = coord, alpha = alpha,
+                      th1 = th1p, th2 = th2p, anchor = anchor)
+    
+    lp_ll    <- sum(z_vec * llp$l1 + (1 - z_vec) * llp$l2)
+    lp_prior <- dlog_gamma(th2p, a_th2, b_th2) + dlog_gamma(delp, a_del, b_del)
+    lp_jac   <- eta2 + etad
+    list(value = lp_ll + lp_prior + lp_jac,
+         th1 = th1p, th2 = th2p, del = delp, l1_vec = llp$l1, l2_vec = llp$l2)
+  }
+  
+  keep_cursor <- 1L
+  for (it in seq_len(n_iter)) {
+    
+    ## (1) blocked MH for (θ2, δ) on log-scale
+    n_prop <- n_prop + 1L
+    eta2  <- log(th2);  etad <- log(del)
+    eta2p <- rnorm(1, mean = eta2, sd = prop_sd_log_th2)
+    etadp <- rnorm(1, mean = etad, sd = prop_sd_log_del)
+    
+    # current value via same function
+    curr <- logpost_eta(eta2, etad, z)
+    prop <- logpost_eta(eta2p, etadp, z)
+    
+    if (log(runif(1)) < (prop$value - curr$value)) {
+      th2 <- prop$th2;  del <- prop$del;  th1 <- prop$th1
+      ll$l1 <- prop$l1_vec; ll$l2 <- prop$l2_vec
+      acc_block <- acc_block + 1L
+    }
+    # else keep (th1,th2,del,ll) as-is
+    
+    ## (2) Gibbs for lambda | z (Beta-conjugate)
+    n1 <- sum(z); n0 <- length(z) - n1
+    lambda <- rbeta(1, a_lambda + n1, b_lambda + n0)
+    
+    ## (3) Gibbs for z | x, θ, λ
+    tau <- tau_from_ll(ll$l1, ll$l2, lambda)
+    z   <- rbinom(length(tau), 1, tau)
+    
+    ## store thinned draws
+    if (it %in% keep_idx) {
+      tau_bar <- tau_bar + tau / n_keep
+      draws$lambda[keep_cursor] <- lambda
+      draws$theta1[keep_cursor] <- th1
+      draws$theta2[keep_cursor] <- th2
+      z_draws[keep_cursor, ]    <- z
+      keep_cursor <- keep_cursor + 1L
+    }
+    
+    if (verbose_every > 0 && it %% verbose_every == 0) {
+      cat(sprintf("iter %d | lambda=%.3f θ1=%.3f θ2=%.3f | acc(θ-block)=%.3f\n",
+                  it, lambda, th1, th2, acc_block / n_prop))
+    }
+  }
+  
+  list(
+    draws = draws,
+    z_draws = z_draws,
+    accept_rate_theta_block = acc_block / n_prop,
+    tau_bar = tau_bar,
+    hard_labels = ifelse(tau_bar > 0.5, 1, 2),
+    post_mean = c(lambda = mean(draws$lambda),
+                  theta1 = mean(draws$theta1),
+                  theta2 = mean(draws$theta2)),
+    post_median = c(lambda = median(draws$lambda),
+                    theta1 = median(draws$theta1),
+                    theta2 = median(draws$theta2))
+  )
+}
+```
+
+fit the data
+```{r}
+alpha <- 1.5
+
+fit1 <- mcmc_br(
+  data = extreme_L1_hourly, coord = coord, alpha = alpha,
+  n_iter = 10000, burn = 2000, thin = 2,
+  # priors
+  a_lambda = 1, b_lambda = 1,   # prior for mixture weight lambda
+  a_th2 = 1, b_th2 = 1,         # prior for theta2
+  a_del = 1, b_del = 1,         # prior for delta
+  # initials
+  init_th2  = 2,
+  init_del  = 4,
+  # proposals (log-scale)
+  prop_sd_log_th2  = 0.01,
+  prop_sd_log_del  = 0.01,
+  anchor = 1,
+  verbose_every = 50
+)
+
+save(fit1, file = "application_fit_hourly_final.RData")
+```
+
+```{r}
+df <- fit1$draws
+g1 <- ggplot(df, aes(iter, theta1)) + geom_line() +
+  labs(title = expression(trace~theta[1]))
+g2 <- ggplot(df, aes(iter, theta2)) + geom_line() +
+  labs(title = expression(trace~theta[2]))
+g3 <- ggplot(df, aes(iter, lambda)) + geom_line() +
+  labs(title = expression(trace~lambda))
+gd1 <- ggplot(df, aes(theta1)) + geom_density() +
+  labs(title = expression(density~theta[1]))
+gd2 <- ggplot(df, aes(theta2)) + geom_density() +
+  labs(title = expression(density~theta[2]))
+gd3 <- ggplot(df, aes(lambda)) + geom_density() +
+  labs(title = expression(density~lambda))
+
+gridExtra::grid.arrange(g1,g2,g3, gd1,gd2,gd3, ncol = 3)
+```
+```{r}
+fit1$post_mean
+```
+
+```{r}
+sd(fit1$draws$theta1)
+sd(fit1$draws$theta2)
+```
+
+
+```{r}
+plot_extreme_on_map <- function(i, extreme_mat = extreme_L1_hourly,
+                                map_sf = square_map, data_wide = data_hourly_sub) {
+  stopifnot(is.matrix(extreme_mat),
+            i >= 1, i <= nrow(extreme_mat))
+  
+  # column order of pixels in the wide daily data used to build rain_mat/extreme_L1
+  pix_order <- as.integer(sub("P", "", colnames(data_wide)[-1]))
+  
+  # values for the i-th extreme event
+  vals_i <- as.numeric(extreme_mat[i, ])
+  df_i <- data.frame(PIXEL = pix_order, val_i = vals_i)
+  
+  # join to geometry
+  joined <- map_sf %>%
+    left_join(df_i, by = "PIXEL")
+  
+  # quick stretch for nicer legend breaks
+  brks <- quantile(df_i$val_i, probs = seq(0, 1, length.out = 6), na.rm = TRUE)
+  brks_fixed <- sort(unique(brks))
+  # plot
+  mapview(
+    joined,
+    zcol       = "val_i",
+    layer.name = paste0("Extreme L1 snapshot (row ", i, ")"),
+    at         = brks_fixed
+  )
+}
+```
+
+```{r}
+plot_extreme_on_map(1)
+```
+
+```{r}
+plot_extreme_on_map(5)
+```
+
+$\chi^2(S_A, S_B)$ test
+```{r}
+chi_q <- function(X, q = 0.98) {
+  n <- ncol(X)
+  m <- nrow(X)
+  
+  # thresholds at site level
+  u <- apply(X, 2, quantile, probs = q, na.rm = TRUE)
+  
+  # initialize matrix
+  chi_hat <- matrix(NA, n, n)
+  
+  for (i in 1:(n-1)) {
+    for (j in (i+1):n) {
+      Ai <- X[, i] > u[i]
+      Aj <- X[, j] > u[j]
+      chi_hat[i, j] <- mean(Ai & Aj) / mean(Ai)
+      chi_hat[j, i] <- chi_hat[i, j]
+    }
+  }
+  diag(chi_hat) <- 1
+  chi_hat
+}
+
+dist_matrix <- as.matrix(dist(coord))
+
+stopifnot(length(fit1$hard_labels) == nrow(extreme_L1_hourly))
+labs <- fit1$hard_labels
+
+X1 <- extreme_L1_hourly[labs == 1, , drop = FALSE]
+X2 <- extreme_L1_hourly[labs == 2, , drop = FALSE]
+
+# 4) compute χ̂_q for both comps and two q levels
+chi_95_c1 <- chi_q(X1, q = 0.95)
+chi_95_c2 <- chi_q(X2, q = 0.95)
+chi_90_c1 <- chi_q(X1, q = 0.90)
+chi_90_c2 <- chi_q(X2, q = 0.90)
+```
+
+
+```{r}
+upper_to_df <- function(chi_mat, dist_mat, q_label, comp_label) {
+  idx <- which(upper.tri(chi_mat), arr.ind = TRUE)
+  tibble(
+    dist = dist_mat[idx],
+    chi  = chi_mat[idx],
+    q    = q_label,
+    comp = comp_label
+  ) %>% filter(is.finite(chi))
+}
+
+df_all <- bind_rows(
+  upper_to_df(chi_95_c1, dist_matrix, "q=0.95", "Comp1"),
+  upper_to_df(chi_95_c2, dist_matrix, "q=0.95", "Comp2"),
+  upper_to_df(chi_90_c1, dist_matrix, "q=0.90", "Comp1"),
+  upper_to_df(chi_90_c2, dist_matrix, "q=0.90", "Comp2"),
+
+)
+
+# 6) plot (mirrors your original style)
+ggplot(df_all, aes(x = dist, y = chi, color = comp)) +
+  geom_point(alpha = 0.4, size = 0.6) +
+  facet_wrap(~ q, scales = "free_y") +
+  theme_bw() +
+  labs(
+    x = expression(h(s[A], s[B])),
+    y = expression(hat(chi)[q](s[A], s[B])),
+    title = "Empirical " %+% expression(hat(chi)[q]) %+% " vs Distance by MCMC Hard-Label Component"
+  ) +
+  scale_color_manual(values = c("Comp1" = "blue", "Comp2" = "red"))
+
+```
+
+
+
+```{r}
+for (i in seq_len(ncol(fit1$z_draws))) {
+  plot(
+    fit1$z_draws[, i],
+    type = "l",
+    xlab = "iterations",
+    ylab = "z draw",
+    main = paste("sample", i) # <--- Modified line
+  )
+}
+```
+```{r}
+
+
+plot(times_hourly, fit1$tau_bar, type = "l",
+     xlab = "Time", ylab = "Posterior mean of z",
+     main = "Posterior mean with season")
+
+```
+
+
+
+
